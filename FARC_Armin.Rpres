@@ -1,0 +1,1336 @@
+Open Source Analytics for Smarter Pricing Decisions in Retail
+========================================================
+author: Armin Kakas | MinneAnalytics FAR Con
+date: August 12, 2015
+
+Agenda
+========================================================
+type: alert   
+- A bit about pricing in retail     
+- Key considerations for strategic and tactical retail pricing
+- The role of (open source) analytics in pricing
+- Case study   
+- **http://rpubs.com/KakasA09/FARCon082015**   
+
+```{r "startupdata", echo = FALSE, results ='hide', warning=FALSE, error=FALSE, message=FALSE}
+wants <- c("knitr", "caret","boot","data.table", "ggplot2",
+             "gridExtra", "pander", "ggthemes", 
+             "scales", "foreign", "magrittr", "reshape2",
+             "tidyr", 'plyr',"dplyr", "RColorBrewer", "qcc", "hydroGOF","glmnet",
+           'mgcv', 'cvTools', 'rpart', 'class', 'psych', 
+           'rpart.plot', 'randomForest', 'corrplot', 'partykit', 'choroplethr')
+has   <- wants %in% rownames(installed.packages())
+if(any(!has)) install.packages(wants[!has])
+lapply(wants, library, character.only=T)
+
+setwd("~/Documents/Analytics - R-Python-etc./Presentations/Minneanalytics Retail Conference")
+
+wd <- ifelse(basename(getwd())=="Data", 
+               gsub("/Data", "", getwd()),
+               getwd())
+
+opts_knit$set(root.dir=wd)
+  
+opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE,
+               results="asis", prompt=FALSE, error=FALSE,
+               fig.width=10, fig.height=8)
+
+```
+
+Pricing in Retail
+========================================================
+type: section
+
+
+Pricing most impactful business lever   
+========================================================
+- Smart pricing tactics > cost reduction efforts   
+*Source*: [Managing Price, Gaining Profit](http://web.nchu.edu.tw/~hjlee/files/Pricing_Strategy/03_Managing%20price,%20Gaining%20Profit.pdf)   
+
+<div align="center">
+<img src="https://raw.githubusercontent.com/KakasA09/FARCon_Aug2015/master/pricing_business_lever.png" width=700 height=500>
+</div>
+
+
+Let's look at some real world examples
+========================================================
+type: prompt
+- 2014 Income Statement components for top retailers   
+    + (Revenue - Cost of Goods Sold) = Gross Profit  
+    + (Gross Profit - Selling, General & Administrative Expenses) = Operating Income   <small>
+    + (COGS + SG&A) = Operating Expenses  
+    + (Revenue - Operating Expenses) = Operating Income  </small>
+
+How things looked in 2014
+========================================================
+type: prompt
+```{r "s2",echo=FALSE}
+#what happens if retailers increase price realization by x percent...also assume 80/20 rule, thus creating a more conservative estimate of the impact (influencing only the 20pct revenue).
+
+#downloading retailers' Income Statements and Balance Sheets automatically from the web
+library(quantmod)
+
+bestbuy <- getFinancials('BBY'); bestbuy_annual_IS = BBY.f$IS$A 
+kohls <- getFinancials('KSS'); kohls_annual_IS = KSS.f$IS$A
+jcp <- getFinancials('JCP'); jcp_annual_IS = JCP.f$IS$A
+wholefoods <- getFinancials('WFM'); wholefoods_annual_IS = WFM.f$IS$A
+walmart <- getFinancials('WMT'); walmart_annual_IS = WMT.f$IS$A
+target <- getFinancials('TGT'); target_annual_IS = TGT.f$IS$A
+
+#let's only look at 2015 data
+retailer_IS = data.frame(cbind(bestbuy_annual_IS[,1], kohls_annual_IS[,1], 
+                    jcp_annual_IS[,1], wholefoods_annual_IS[,1],
+                    walmart_annual_IS[,1], target_annual_IS[,1]))
+
+#rename the columns to align with our retailers' names
+names(retailer_IS) = c('bestbuy','kohls','jcpenney',
+                       'wholefoods','walmart','target')
+
+#filter out only relevant financials
+#stop at Operating Income or EBIT
+retailer_IS = retailer_IS[c('Revenue','Cost of Revenue, Total',
+                            'Gross Profit', 'Selling/General/Admin. Expenses, Total',
+                            'Total Operating Expense', 'Operating Income'),]
+
+row.names(retailer_IS) = c('Revenue','COGS','Gross_Profit','SG_and_A',
+                           'Op_Expenses', 'Op_Income')
+
+#reshape our data for better manipulation
+retailer_IS_melt = melt(retailer_IS)
+retailer_IS_melt$category = rep(row.names(retailer_IS),6)
+retailer_IS = data.table(dcast(retailer_IS_melt, variable ~ category))
+setnames(retailer_IS, 'variable','retailer')
+
+setcolorder(retailer_IS, c('retailer','Revenue','COGS','Gross_Profit','SG_and_A','Op_Expenses','Op_Income'))
+
+#estimate impact of pricing vs. cost reduction 
+
+retailer_IS = tbl_dt(retailer_IS) %>% mutate(
+        Op_Income_1pct_cogsreduc = (Revenue - COGS*0.99 - SG_and_A),
+        Op_Income_5pct_cogsreduc = (Revenue - COGS*0.95 - SG_and_A),
+        Op_Income_10pct_cogsreduc = (Revenue - COGS*0.90 - SG_and_A),
+        Op_Income_1pct_pricerealization = (Revenue * 1.01 - COGS - SG_and_A),
+        Op_Income_5pct_pricerealization = (Revenue * 1.05 - COGS - SG_and_A),
+        Op_Income_10pct_pricerealization = (Revenue * 1.1 - COGS - SG_and_A)
+)
+
+retailer_IS_scenarios = retailer_IS %>% mutate(
+          impact_at_1pct = Op_Income_1pct_pricerealization - Op_Income_1pct_cogsreduc,
+          impact_at_5pct = Op_Income_5pct_pricerealization - Op_Income_5pct_cogsreduc,
+          impact_at_10pct = Op_Income_10pct_pricerealization - Op_Income_10pct_cogsreduc)
+
+IS_basedata <- tbl_dt(melt(select(retailer_IS_scenarios, retailer, Revenue, COGS, 
+                                  Gross_Profit, SG_and_A,
+                                  Op_Expenses, Op_Income), id.vars = 'retailer')) 
+
+IS_scenariodata <- tbl_dt(melt(select(retailer_IS_scenarios, retailer, Op_Income,
+                                      Op_Income_1pct_cogsreduc, 
+                                      Op_Income_5pct_cogsreduc, 
+                                      Op_Income_10pct_cogsreduc, 
+                                  Op_Income_1pct_pricerealization, 
+                                  Op_Income_5pct_pricerealization,
+                                  Op_Income_10pct_pricerealization), id.vars = 'retailer'))
+
+
+basegraph <- ggplot(data=IS_basedata, aes(x=variable, y=value, fill=variable)) +
+    geom_bar(stat="identity", position=position_dodge(), colour="black") + 
+    theme_economist_white()
+
+basegraph + facet_wrap(~ retailer, scales = 'free') +
+    labs(title = "Key financial results by retailer", x="2014 Income Statement", y="$MMs") + 
+    theme(legend.text = element_text(size = 12), plot.title = element_text(size = 20),
+          axis.text.x = element_blank(),
+          axis.title = element_text(size = 18),
+          strip.text = element_text(size= 18, face = 'bold')) + 
+          scale_y_continuous(labels = dollar)
+
+```
+
+...with X % improvement in COGS or prices 
+========================================================
+type: prompt
+```{r "s2b",echo=FALSE}
+scenariograph <- ggplot(data=IS_scenariodata, aes(x=variable, y=value, fill=variable)) +
+    geom_bar(stat="identity", position=position_dodge(), colour="black") + 
+    theme_economist_white()
+
+
+scenariograph + facet_wrap(~ retailer, scales = 'free') +
+    labs(title = "Impact of X pct COGS reduction OR price realization", 
+         x="2014 pro-forma operating income", y="$MMs") + 
+    geom_text(aes(x = variable, y = value, 
+                  label = paste0(round(value/1000,1),'B')),
+              hjust=1,vjust=0.5, size = 5, fontface = 'bold',
+              colour = 'black',angle = 90) +
+    theme(legend.text = element_text(size = 12), plot.title = element_text(size = 20),
+          axis.text.x = element_blank(),
+          axis.title = element_text(size = 18),
+          strip.text = element_text(size= 18, face = 'bold'),
+          legend.position='top') + guides(fill=guide_legend(ncol=3)) +
+          scale_y_continuous(labels = dollar)
+```
+
+
+Who "owns" pricing? 
+========================================================
+left: 47%
+- Pricing teams typically organized under *Finance*, *Planning* or *Marketing*    
+- Pricing **decisions** in retail traditionally reside with merchants (buyers)  <small>
+    + Have to deal with merchandising, operations, new product intros, cost negotiations, etc.    
+    + Managerial folklore tends to overtake </small>   
+    
+***
+
+- Centralized, in-house pricing teams are most effective:   <small>  
+    + Pricing analytics and strategy   
+    + Pricing systems and operations   </small>
+- Pricing teams need to **own** pricing (like Finance owns finance, etc.)   <small>  
+    + Price setting should be data-driven and automated   
+    + At least for the long-tail (e.g.: 90% of product assortment)     </small>
+    
+    
+What is the right pricing strategy?   
+========================================================
+- **EDLP** vs. **High-Low** vs. **Hybrid**    <small>
+    + EDLP: Walmart, Winn-Dixie, Home Depot, Aldi, Costco  
+    + High / Low: Khol's, Meijer, many mid-size grocers   
+    + Hybrid: Publix, Giant, Fred Meyer  </small>
+- National vs localized 
+- Brick & mortar vs. online channel parity    
+    + **Or** strategic differences to exist  
+- Manual vs. automated price setting      
+    
+    
+Remember the long-tail?       
+========================================================
+```{r "s2c",echo=FALSE}
+
+ltail <- data.frame(
+    cumulative_pct_of_sales = c('0-10pct','10-20pct','20-30pct','30-40pct',
+                                '40-50pct','50-60pct','60-70pct', '70-80pct',
+                                '80-90pct','90-100pct'),
+    number_of_products = c(20,60,300,1000,2000,5000,10000,15000,
+                           25000,50000)
+)
+
+total_products = sum(ltail$number_of_products)
+ltail <- tbl_df(ltail) %>% mutate(pct_of_assortment = number_of_products / total_products)
+                            
+                    
+ggplot(data=ltail, aes(x=cumulative_pct_of_sales, y=pct_of_assortment, fill=number_of_products)) +
+    geom_bar(stat="identity", position=position_dodge(), colour="black") + 
+    theme_economist() + guides(fill=FALSE) + 
+    geom_text(aes(x = cumulative_pct_of_sales, y = pct_of_assortment, 
+                  label = paste0(round(pct_of_assortment,3)*100,'%')),
+              hjust=0.5,vjust=-0.4, size = 6) + 
+    labs(title = "The long tail of product assortment", x="percent of total revenue", y="percent of products") + 
+    theme(legend.text = element_text(size = 12), plot.title = element_text(size = 22),
+          axis.text.x = element_text(size = 14),
+          axis.text.y = element_text(size = 18),
+          axis.title = element_text(size = 20),
+          strip.text = element_text(size= 18, face = 'bold')) + 
+          scale_y_continuous(labels = percent)
+
+```    
+    
+Key pricing considerations
+========================================================
+type: section
+
+
+Strategic  
+========================================================
+- Delivering on financial results for key stakeholders  *(duh!)* 
+- Price competitiveness 
+    + Where do I need to be competitive?     
+    + Where do I need to **beat** competition?    
+    + Where is it okay to be **lower priced**? 
+- Price perception    
+    + Can I raise price and still improve consumer perception? 
+    
+========================================================
+- Pricing strategy needs to support product / category / business unit goals
+    + Improve market share, revenue or margin?
+- Price wars usually do not end well  
+- Departure from core pricing strategy needs to be done carefully  
+- Price match guarantees are great PR and effective strategy to self-segment price conscious customers  
+
+
+What pricing changes would you make?
+========================================================
+type: prompt
+```{r "s2d",echo=FALSE}
+
+CPIs <- seq(50,150,1)
+price_perception_influencers <- seq(0,10,1)
+revenues <- c(seq(1000,100000,1000), seq(100000,1000000,10000), seq(100,1000,100))
+elasticity_groups <- c('High','Medium','Medium','Low','Low')
+
+set.seed(1234)
+productdata <- data.frame(product = paste('SKU',seq(1,10,1), sep='_'),
+                          comp_price_index = sample(CPIs, size=10, replace = FALSE),
+                          revenue = sample(revenues, size=10, replace = FALSE),
+                          perception_index = sample(price_perception_influencers, size=10, replace=TRUE),
+                          elasticity_group = sample(elasticity_groups, size=10, replace = TRUE))
+
+productdata$revenue <- as.integer(productdata$revenue)
+productdata$elasticity_group <- factor(productdata$elasticity_group,
+                                       levels=c('High','Medium','Low'))
+
+
+# 3D scatterplot to get a profile of our states
+# create column indicating point color
+productdata$pcolor[productdata$elasticity_group == 'High'] <- "darkred"
+productdata$pcolor[productdata$elasticity_group == 'Medium'] <- "orange"
+productdata$pcolor[productdata$elasticity_group == 'Low'] <- "yellow"
+
+
+library(scatterplot3d)
+library(plotrix)
+
+with(productdata, {
+    s3d <- scatterplot3d(comp_price_index, perception_index, revenue/1000,        # x y and z axis
+                  color="blue", bg = pcolor, pch=21,  # circle color indicates elasticity groups
+                  type="h", lty.hplot=2,       # lines to the horizontal plane
+                  scale.y=.75,                 # scale y axis (reduce by 25%)
+                  main='Sample of 10 products for a Retailer',
+                  cex.main =2,
+                  sub = '*simulated data',
+                  xlab="competitive price index",
+                  ylab="price perception influence index",
+                  zlab="revenue (000s)",
+                  font.axis = 2,
+                  cex.lab = 1.25,
+                  cex.axis = 1.1,
+                  col.lab =  'black',
+                  cex.symbols = 2.5,
+                  mar = c(3.2,3.2,3.2,3))
+     s3d.coords <- s3d$xyz.convert(comp_price_index, perception_index, revenue/1000)
+     text(s3d.coords$x, s3d.coords$y,     # x and y coordinates
+          labels= productdata$product,       # text to plot
+          pos=3, cex=1, font=2, col = 'darkblue')                  # shrink text 50% and place to right of points)
+# add the legend
+legend("topleft", inset=0.05,      # location and inset
+    bty="o", cex=.9,              # suppress legend box, shrink text 50%
+    title="price sensitivity",
+    c('High','Medium','Low'), 
+    fill=c("darkred","orange", "yellow"),
+    pt.bg = 'white',
+    bg = 'white')
+})
+
+```  
+
+
+Don't depart from core pricing strategy
+========================================================
+type: alert
+<div class="slideContent" >
+<p><img src="https://raw.githubusercontent.com/KakasA09/FARCon_Aug2015/master/jc_penney.PNG" alt="from Forbes"/><br/>
+<small> <a href="http://www.abcnews.com">www.abcnews.com</a> </small></p>
+
+
+Price match guarantees are effective
+========================================================
+type: prompt
+<div class="slideContent" >
+<p><img src="https://raw.githubusercontent.com/KakasA09/FARCon_Aug2015/master/walmart_price_match.PNG" alt=""/><br/>
+<small> <a href="http://www.walmart.com">www.walmart.com</a> </small></p>
+
+
+Brilliant!
+========================================================
+type: prompt
+<div align="center">
+<img src="https://raw.githubusercontent.com/KakasA09/FARCon_Aug2015/master/dilbert_2.jpg" width=868 height=317>
+</div>
+<small> www.dilbert.com </small>
+
+
+Tactical 
+========================================================
+- Price increase is not just about raising prices  
+    + Product mix shift can be powerful
+    + New product innovation at a higher price per unit (per ounce, per lbs, etc.) 
+- Price implementation needs to be systematic, fast and flexible  
+    + Controls must be in place  
+    + Errors flagged before being implemented  
+
+    
+Pricing mistakes can erode reputation    
+========================================================
+type: alert
+<p><img src="https://raw.githubusercontent.com/KakasA09/FARCon_Aug2015/master/whole_foods.PNG" alt=""/><br/>
+<small> <a href="http://www.alternet.org">www.alternet.org</a> </small></p>
+
+
+***
+Errors become public almost instantly
+========================================================
+<p><img src="https://raw.githubusercontent.com/KakasA09/FARCon_Aug2015/master/wmt_price_mistake.jpg" alt=""/><br/>
+<small> <a href="http://www.abcnews.com">www.abcnews.com</a> </small></p>
+***
+
+<p><img src="https://raw.githubusercontent.com/KakasA09/FARCon_Aug2015/master/bby_price_mistake.PNG" alt=""/> 
+<small> <a href="http://www.time.com">www.time.com</a> </small>   </p>
+    
+    
+Competitive (and own) prices transparent  
+========================================================
+- Pricing information is public  
+    + Retailer APIs *(look at Terms & Conditions first!)*      
+    + Company ecommerce channels (website and mobile)      
+    + Price aggregator / comparison shopping sites     
+    + High level price figures from information providers (Nielsen, IRI)  
+- Retailers are aware of competitors' prices  
+    + Weekly, daily, sometimes hourly  
+- Web scraping is taboo, but *everyone is doing it*       
+    + Explosion of specialist firms in recent years  
+    
+The role of (OS) analytics in pricing       
+========================================================
+type: section
+    
+
+Analytical maturity varies at retailers  
+========================================================
+- 40-60% of retailers engaged in analytical initiatives to improve pricing (and promotions) analytics   
+- ~50% of retailers remain at **opportunistic** and **ad-hoc** stages of maturity  
+    + On-demand analytics in support of projects and initiatives, **not** real-time analytics in support of ongoing decision-making  
+    + Data integration takes time  
+    + Lots of manual effort   
+[Source: The Big Data and Analytics Opportunity in Retail: Where's Your Business?](http://hortonworks.com/blog/the-big-data-and-analytics-opportunity-in-retail-wheres-your-business/)     
+
+
+Sounds familiar?  
+========================================================
+<div align="center">
+<img src="https://raw.githubusercontent.com/KakasA09/FARCon_Aug2015/master/dilbert_analytics.png" width=868 height=317>
+</div>
+<small> www.dilbert.com </small>
+
+
+
+Why open source analytics?  
+========================================================
+- Pricing analytical flexibility and creativity   
+- **Attract top talent**  
+- Ensure latest statistical and machine learning methods   
+- Cheap(er)  
+- It is becoming more and more popular  
+- **Open source and commercial software can co-exist**  
+
+
+
+Survey of O'Reilly Strata attendees in 2012-13  
+========================================================
+type: prompt
+<div class="slideContent" >
+<p><img src="https://raw.githubusercontent.com/KakasA09/FARCon_Aug2015/master/data_scientist_tools.png" alt=""/><br/>
+<small> <a href="http://www.oreilly.com">www.oreilly.com</a> </small>  </p>
+
+  
+R and Python among top 10  
+========================================================
+type: prompt
+<div class="slideContent" >
+<p><img src="https://raw.githubusercontent.com/KakasA09/FARCon_Aug2015/master/programming_languages.jpg" alt=""/><br/>
+<small> <a href="http://www.spectrum.ieee.org">www.spectrum.ieee.org</a> </small></p>
+   
+Smart, reproducible price analytics are key  
+========================================================
+- Data-driven pricing decisions > {heuristics, managerial folklore, gut-feel}  
+- For most physical retailers, simple analytics can make a big difference  <small>
+    + *High-school math* analysis: gains/losses, ratios, weighted figures, relative differences, etc.     
+    + *Essential statistics*: linear and logistic regressions, clustering, decision trees   </small>
+- Real-time **descriptive price analytics** is most critical    
+    + *What happened in the past until now?* 
+
+
+========================================================
+- Recurring **exploratory analytics** comes second  
+    + *What drove those events?*  
+- The right technological and human capital must reside in-house for price analytics to be a **core capability**     
+- Advanced analytics useful, but need to get the **analytical core right**  
+    + Predictive analytics (what may happen in the future?)  
+    + Prescriptive analytics (pricing optimization)  
+     
+ 
+Data sources and how to monetize them  
+========================================================
+- Point-of-sale *(POS)* data   <small>
+    + Basis for real-time descriptive analytics  
+    + Evaluate price sensitivities *(elasticities)* to determine where to right-size pricing    
+    + Cluster products and stores based on revenues, profitability, market share, econometric data, etc.   
+    + Determine effectiveness of promotional strategies  </small>
+- **Competitive** pricing data  <small>
+    + Ensure price competitiveness where **it matters**...*(RE: price sensitivities and price perception)*   
+    + Monitor competitors' compliance to industry-specific pricing regulations   </small> 
+    
+========================================================   
+- Online / clickstream   <small>
+    + Customer comments for online ratings and reviews to determine which products drive price perception 
+    + Product pageviews and conversion rates for descriptive analytics and clustering  </small>  
+- Social media (twitter, blogs, etc.)    
+    + Social media feeds to evaluate how consumer sentiment changes with certain pricing strategies  
+- **The goal is to positively impact market share, revenues, margin and price perception** 
+ 
+ 
+Retailer case study
+========================================================
+type: section
+
+Our analytical data set  
+========================================================
+type: prompt
+- Simulated data to mimic *real* aggregated POS data you would obtain internally  
+    + Geo and demographic data obtained publicly  
+- Primary analytical tool is **R**, with some Python  
+- Data sets and full code for presentation is publicly available at **https://github.com/KakasA09**  
+- What can we do with our data to drive decisions (and ideally, **$$$**)?   
+```{r "Data1",echo=FALSE}
+setwd("~/Documents/Analytics - R-Python-etc./Presentations/Minneanalytics Retail Conference/Data")
+#let's load our example store data
+#load example store data
+load('example_store_data.Rda')
+data <- tbl_dt(data)
+data <- data %>% mutate(day.of.week = as.POSIXlt(date)$wday) %>%
+mutate(day.type = ifelse(day.of.week == 0 |
+day.of.week == 6, "Weekend","Weekday"))
+data$day.type = factor(data$day.type, levels = c('Weekday','Weekend'))
+data$day.of.week = factor(data$day.of.week)
+data$product_code = factor(data$product_code, 
+              levels = c('product1','product2','product3','product4','product5',
+                         'product6','product7','product8','product9','product10',
+                         'product11'))
+```    
+<div align="center">
+<img src="https://raw.githubusercontent.com/KakasA09/FARCon_Aug2015/master/head_data2.png" width=1356 height=160.5>
+</div>
+
+Estimating price sensitivities by county and product    
+========================================================
+- **Price elasticity definition:** 
+
+> ...it gives the percentage change in quantity demanded in response to a one percent change in price (ceteris paribus, i.e. holding constant all the other determinants of demand, such as income). *(source: wikipedia)*  
+
+- Several methods for estimating price sensitivity *(none is perfect)*   
+- Log-log linear regression standard in retail and CPG  
+    + Coefficient for *log (price)* is price elasticity  
+
+========================================================
+- In our case, base formula is:  
+> Sales units (log scale) *regressed on* price (log), controlling for the impact of seasonal variables (year, week and weekends), promo and clearance activities and foot traffic (log scale)    
+
+- For this analysis, R's **data.table** and **dplyr** packages can be quite powerful    
+
+
+
+Price sensitivity vs. competitiveness
+========================================================
+type:prompt
+```{r "E1", echo=FALSE}
+#create regression data set at the county and product level
+regdata <- data %>% select(
+    state_long, county.name, product_code, week, year, day.type,
+    price, units, traffic_count, median_gross_income, promo_or_clearance, comp_price_index
+    ) %>%
+    group_by(state_long, county.name, product_code, week, year, day.type, promo_or_clearance) %>%
+    summarise(
+    price = median(price), units = sum(units), traffic_count = sum(traffic_count),
+    median_gross_income = median(median_gross_income),
+    avg_comp_price_index  = mean(comp_price_index, na.rm = TRUE)
+    ) %>% filter(product_code != 'product7')
+
+county.number = length(unique(regdata$county.name))
+product.number = length(unique(regdata$product_code))
+
+
+coef <- regdata[, .(price.elasticity = 
+                coef(lm(log(units) ~ log(price) + year + 
+                            week + promo_or_clearance + log(traffic_count) * day.type))[2],
+p.value = summary(lm(log(units) ~ log(price) + year + week + promo_or_clearance + 
+                         log(traffic_count) * day.type))$coefficients[2,4],
+avg_comp_price_index = mean(avg_comp_price_index)),
+by = .(state_long, county.name, product_code)]
+
+#since elasticity less than zero makes no practical sense, we will set those to zero
+#also, artificially inflating elasticities for the sake of visual illustrations and clustering
+elasticities <- coef %>% arrange(price.elasticity) %>%
+mutate(price.elasticity = ifelse(price.elasticity > 0,0,price.elasticity*3),
+       avg_comp_price_index = round(avg_comp_price_index,0))
+
+product_elasticities <-
+ggplot(elasticities, aes(x = product_code, y = abs(price.elasticity), fill = product_code)) + 
+  geom_boxplot() + coord_flip() + theme_economist() + guides(fill =FALSE) +
+theme(
+strip.text.x = element_text(size = 18), axis.title = element_text(vjust =
+0.5, size = 18),
+axis.text = element_text(size = 14), legend.text = element_text(size =
+16),
+title = element_text(size = 14)
+) + labs(title = "Distribution of county-level price sensitivities",
+         x="products", y="price elasticity - absolute value (low to high)") + 
+    theme(legend.text = element_text(size = 12), plot.title = element_text(size = 22),
+          axis.text.x = element_text(size = 18, face = 'bold',color = 'darkred'),
+          axis.text.y = element_text(size = 18),
+          axis.title = element_text(size = 16),
+          title = element_text(size = 18, color = 'black'))
+
+
+product_competitiveness <-
+ggplot(elasticities, aes(x = product_code, y = avg_comp_price_index, fill = product_code)) + 
+  geom_boxplot() + coord_flip() + theme_economist_white() + guides(fill =FALSE) +
+theme(
+strip.text.x = element_text(size = 18), axis.title = element_text(vjust =
+0.5, size = 18),
+axis.text = element_text(size = 14), legend.text = element_text(size =
+16),
+title = element_text(size = 14)
+) + labs(title = "Distribution of county-level price competitiveness",
+         x="products", y="average competitive price index (low to high)") + 
+    theme(legend.text = element_text(size = 12), plot.title = element_text(size = 22),
+          axis.text.x = element_text(size = 18, face = 'bold',color = 'darkblue'),
+          axis.text.y = element_text(size = 18),
+          axis.title = element_text(size = 16),
+          title = element_text(size = 18, color = 'darkred'))
+
+
+
+grid.arrange(product_elasticities, product_competitiveness,nrow=2)
+
+```
+
+
+State level performance snapshot     
+========================================================
+- Visual analytics can easily be **5 dimensional**    <small>  
+    + ...and reproducible   
+    + ...and value-added!  </small>
+- Visual analytics dimensions are more than just axes  
+    + Use *scatterplot3d* package in R to help you out  
+- *Let's look at the raw data again:* 
+<div align="center">
+<img src="https://raw.githubusercontent.com/KakasA09/FARCon_Aug2015/master/head_data2.png" width=1356 height=160.5>
+</div>
+
+
+What shifts in strategy would you explore?    
+========================================================
+type:prompt
+```{r "E2", echo=FALSE}
+
+data <- merge(data, elasticities, by = c('state_long','county.name','product_code'))
+
+data <- data %>% mutate(elasticity_group = 
+                            ifelse(price.elasticity < -2, 'High',
+                                   ifelse(price.elasticity < - 1, 'Medium',
+                                          'Low')))
+
+
+storedata <- data %>% group_by(store_name) %>% 
+            summarise(weighted_comp_price_index = round(sum(comp_price_index * units)/sum(units),0),
+                      weighted_elasticity = abs(round(sum(price.elasticity*units)/sum(units),2)),
+                      median_income = median(median_gross_income)/1000,
+                      total_units = sum(units))
+
+#creating a state-level summary/profile data to visualize states' performance
+#for the retailer
+
+state_yoy_revenue = data %>% mutate(revenue = units * price) %>% filter(year == '2015') %>%
+                    group_by(state, year) %>% summarise(total_revenue = sum(revenue),
+                                                        number_days = n_distinct(date),
+                                                        number_stores = n_distinct(store_name)) %>%
+                    mutate(revenue_store_day = round(total_revenue / number_days/number_stores,0)) %>%
+                    select(state, revenue_store_day)
+    
+statedata <- data %>% group_by(state) %>% 
+            summarise(weighted_comp_price_index = round(sum(comp_price_index * units)/sum(units),0),
+                      weighted_elasticity = abs(round(sum(price.elasticity*units)/sum(units),2)),
+                      median_income = median(median_gross_income)/1000,
+                      total_units = sum(units)) %>% 
+                 mutate(elasticity_group = ifelse(weighted_elasticity < 0.75,
+                                                  'Low',ifelse(weighted_elasticity < 2,
+                                                               'Medium','High')))
+
+statedata <- merge(statedata, state_yoy_revenue, by = 'state')
+
+statedata <- tbl_df(statedata) %>% filter(state %in% c('WV','WI','TX','OH','AZ','KY','MS','TN','OR','MI',
+                                                       'NY','SD','CA'))
+
+# 3D scatterplot to get a profile of our states
+# create column indicating point color
+statedata$pcolor[statedata$elasticity_group == 'High'] <- "darkred"
+statedata$pcolor[statedata$elasticity_group == 'Medium'] <- "orange"
+statedata$pcolor[statedata$elasticity_group == 'Low'] <- "yellow"
+
+
+with(statedata, {
+    s3d <- scatterplot3d(weighted_comp_price_index, median_income, revenue_store_day,        # x y and z axis
+                  color="blue", bg = pcolor, pch=21,  # circle color indicates elasticity groups
+                  type="h", lty.hplot=2,       # lines to the horizontal plane
+                  scale.y=.75,                 # scale y axis (reduce by 25%)
+                  main='5D State Profile* of our Retailer in 2015',
+                  sub = '*size = total unit sales',
+                  cex.main = 2,
+                  xlab="weighted comp price index",
+                  ylab="median income ($000s)",
+                  zlab="daily revenue per store",
+                  font.axis = 2,
+                  cex.lab = 1.25,
+                  cex.axis = 1.1,
+                  col.lab =  'black',
+                  mar = c(3.2,3.2,3.2,3),
+                  cex.symbol = rescale(total_units, c(0.5,8)))
+     s3d.coords <- s3d$xyz.convert(weighted_comp_price_index, median_income, revenue_store_day)
+     text(s3d.coords$x, s3d.coords$y,     # x and y coordinates
+          labels= statedata$state,       # text to plot
+          pos=3, cex=1.5, font = 2)                  # shrink text 50% and place to right of points)
+# add the legend
+legend("topright", inset=0.05,      # location and inset
+    bty="o", cex=.9,              # suppress legend box, shrink text 50%
+    title="price elasticity",
+    c('High','Medium','Low'), 
+    fill=c("darkred","orange", "yellow"),
+    pt.bg = 'white',
+    bg = 'white')
+})
+
+```
+
+
+
+Which areas are driving (or eroding) price competitiveness?  
+========================================================
+- Let's take a look at our data again  
+- **maps** and **ggplot** packages enable you to visualize results and performance trends at the zip code and above levels
+<div align="center">
+<img src="https://raw.githubusercontent.com/KakasA09/FARCon_Aug2015/master/head_data2.png" width=1356 height=160.5>
+</div>
+
+```{r "E4",echo=FALSE}
+#let's invoke the 'maps' library, so we can visualize certain pricing metrics by geography
+library('maps')
+state_map = map_data('state')
+state_map = tbl_dt(state_map)
+
+#create a data frame with states and weighted competitive price indeces
+weighted_comp_index_state = data %>% group_by(state_long) %>% 
+    summarise(weighted_comp_price_index = 
+               round(sum(comp_price_index * units)/sum(units),0)) %>%
+                    rename(region = state_long)
+
+#ordering the states from weak to strong price competitiveness
+state_compindex_rank = weighted_comp_index_state %>% arrange(desc(weighted_comp_price_index))
+
+weighted_comp_index_state = left_join(state_map,weighted_comp_index_state, by = 'region')
+
+
+#let's plot price competitiveness by state, using ggplot!
+price_compindex_state <- ggplot(weighted_comp_index_state, aes(map_id = region)) + 
+    geom_map(aes(fill = weighted_comp_price_index), map = state_map) + theme_economist() + 
+        scale_fill_continuous(low='green',high='red', na.value='white', 
+                               name = 'Weighted competitive price index',
+                          guide=guide_legend(direction = 'horizontal', title.position = 'top', 
+                                            label.position = 'bottom', 
+                                            label.hjust = 0.5, label.vjust = 0.5,
+                                            label.theme = element_text(angle = 90))) +
+    expand_limits(x = state_map$long, y = state_map$lat) +
+    coord_map()  + labs(title = "Price competitiveness by state", x="longitude",y="latitude") + 
+    theme(legend.text = element_text(size = 12), plot.title = element_text(size = 20),
+          legend.title  = element_text(size = 16))
+
+
+#create a data frame with counties (regions) and weighted competitive price indeces
+#let's see how the counties measure up in each state
+county_map = map_data('county')
+county_map = tbl_dt(county_map)
+setnames(county_map, c('region','subregion'),c('state_long','region'))
+
+weighted_comp_index_county = data %>% group_by(county.name, state_long) %>% 
+    summarise(weighted_comp_price_index = 
+              round(sum(comp_price_index * units)/sum(units),0)) %>%
+                    rename(region = county.name)
+
+tn_comp_index = weighted_comp_index_county[state_long == 'tennessee']
+ne_comp_index = weighted_comp_index_county[state_long == 'nebraska']
+
+
+county_map_tn = county_map %>% filter(state_long == 'tennessee') %>% select(-state_long)
+county_map_ne = county_map %>% filter(state_long == 'nebraska') %>% select(-state_long)
+
+
+weighted_comp_index_tn = left_join(county_map_tn,tn_comp_index, by = c('region')) %>% 
+                            select(-state_long)
+
+weighted_comp_index_ne = left_join(county_map_ne,ne_comp_index, by = c('region')) %>% 
+                            select(-state_long)
+
+
+#Creating centroids for county names
+tnnames <- aggregate(cbind(long, lat) ~ region, data=na.omit(weighted_comp_index_tn), 
+                    FUN=function(x)mean(range(x)))
+
+nenames <- aggregate(cbind(long, lat) ~ region, data=na.omit(weighted_comp_index_ne), 
+                    FUN=function(x)mean(range(x)))
+
+
+
+#let's plot price competitiveness for TN and NE, using ggplot!
+price_compindex_tn <- ggplot(weighted_comp_index_tn, aes(map_id = region)) + 
+    geom_map(aes(fill = weighted_comp_price_index), map = county_map_tn) +   theme_economist() + 
+    scale_fill_continuous(low='green',high='red', na.value='white', 
+                          name = 'Weighted competitive price index',
+                          guide=guide_legend(direction = 'horizontal', title.position = 'top', 
+                                            label.position = 'bottom', 
+                                            label.hjust = 0.5, label.vjust = 0.5,
+                                            label.theme = element_text(angle = 90))) +
+    expand_limits(x = county_map_tn$long, y = county_map_tn$lat) +
+    coord_map()  + geom_text(data = tnnames, aes(long, lat, label = region,
+                                                 fontface = 'bold'))+
+    labs(title = "Price competitiveness in TN by county", x="longitude",y="latitude") + 
+    theme(legend.text = element_text(size = 12), plot.title = element_text(size = 20),
+          legend.title  = element_text(size = 16))
+
+
+price_compindex_ne <- ggplot(weighted_comp_index_ne, aes(map_id = region)) + 
+    geom_map(aes(fill = weighted_comp_price_index), map = county_map_ne) + theme_economist() + 
+    scale_fill_continuous(low='green',high='red', na.value='white', 
+                           name = 'Weighted competitive price index',
+                          guide=guide_legend(direction = 'horizontal', title.position = 'top', 
+                                            label.position = 'bottom', 
+                                            label.hjust = 0.5, label.vjust = 0.5,
+                                            label.theme = element_text(angle = 90))) +
+    expand_limits(x = county_map_ne$long, y = county_map_ne$lat) +
+    coord_map()  + geom_text(data = nenames, aes(long, lat, label = region,
+                                                 fontface = 'bold'))+
+      labs(title = "Price competitiveness in NE by county", x="longitude",y="latitude") + 
+    theme(legend.text = element_text(size = 12), plot.title = element_text(size = 20),
+          legend.title  = element_text(size = 16))
+```
+
+  
+A national view  
+========================================================
+```{r "E4-2",echo=FALSE}
+price_compindex_state
+```
+
+
+Retail locations in only two TN counties 
+========================================================
+type: prompt
+```{r "E4-3",echo=FALSE}
+price_compindex_tn
+```
+
+
+
+What about in Nebraska?   
+========================================================
+type: prompt
+```{r "E4-4",echo=FALSE}
+price_compindex_ne
+```
+
+
+
+The importance of textual data is growing   
+========================================================
+type:alert
+- Social media, blogs, and more importantly **consumer ratings and reviews** can and should be analyzed for insights  
+- In pricing, we care about evaluating which products drive price perception   <small>
+    + To what extent do they drive it?  
+    + How does price influence price perception?  </small>
+- Most consumer reviews for retail products are fairly explicit   <small>
+    + Again, *simple analytics can drive powerful insights* 
+    + No need for complex text mining (unlike for blogs, articles, etc. where **context** is important)  </small>
+
+
+========================================================
+<div align="center">
+<img src="https://raw.githubusercontent.com/KakasA09/FARCon_Aug2015/master/bby_comment.PNG" width=945 height=333>
+</div>     
+<small>www.bestbuy.com</small>        
+    
+    
+A recent example
+========================================================
+type:prompt
+- Original data set of 12,000 tweets about **Amazon Prime**    
+    + Obtained via R's **twitteR** package  
+- Rudimentary lexicon based sentiment scoring + popular word and tag *(ngrams)* visualizations created with:   <small>
+    + **tm** package in R for essential text mining  
+    + **dplyr and stringr** for data munging, string manipulations and sentiment scoring   </small>
+- Hourly stock prices through a simple *Python* script   
+- Variables and dimensions of revised *(pure)* tweets  
+
+```{r "E6", echo=FALSE}
+setwd("~/Documents/Analytics - R-Python-etc./Presentations/Minneanalytics Retail Conference/Data")
+#setwd("E:/Minneanalytics Retail Conference/Data")
+
+library('RColorBrewer')
+library('devtools') #if not installed, do that obviously
+#devtools::install_version("httr", version="0.6.0", repos="http://cran.us.r-project.org")
+#A restart of R might be necessary if you previously had httr installed.
+library('httr')
+library('twitteR')
+library('dplyr')
+library("wordcloud")
+library("tm")
+library('stringr')
+
+
+#necessary file for Windows
+#download.file(url="http://curl.haxx.se/ca/cacert.pem", destfile="cacert.pem")
+
+#to get your consumerKey and consumerSecret see the twitteR documentation for instructions
+#consumer_key <- '07YrPw1qT2GT2PI4zNE7JJEuj'
+#consumer_secret <- 'ESh6X962og5zMbVfodj76wEMrXYZNzEETnya0CTsjNdadct8Xo'
+#access_token <- '3281100420-xszp5NsJ5Co3tu0NF3FczOQ1JHRm6t5MCeyLoXu'
+#access_secret <- 'fW9KjGPDc0iVHIzqbr8fwleQOFVcf9VS9BwSK6DjmCz6l'
+#setup_twitter_oauth(consumer_key,consumer_secret,access_token, access_secret)
+
+#the cainfo parameter is necessary only on Windows
+#tweets <- searchTwitter("Amazon + Prime", since = '2015-07-19', until = '2015-07-20', lang = 'en', n=1500)
+#tweets2 <- searchTwitter("Amazon + Prime", since = '2015-07-20', until = '2015-07-21', lang = 'en', n=1500)
+#tweets3 <- searchTwitter("Amazon + Prime", since = '2015-07-21', until = '2015-07-22',lang = 'en',  n=1500)
+#tweets4 <- searchTwitter("Amazon + Prime", since = '2015-07-22', until = '2015-07-23', lang = 'en', n=1500)
+#tweets5 <- searchTwitter("Amazon + Prime", since = '2015-07-23', until = '2015-07-24',lang = 'en',  n=1500)
+#tweets6 <- searchTwitter("Amazon + Prime", since = '2015-07-18', until = '2015-07-19', lang = 'en', n=1500)
+#tweets7 <- searchTwitter("Amazon + Prime", since = '2015-07-17', until = '2015-07-18', lang = 'en', n=1500)
+#tweets8 <- searchTwitter("Amazon + Prime", since = '2015-07-16', until = '2015-07-17',lang = 'en',  n=1500)
+
+#create a data frame of tweets
+#tw.df = twListToDF(tweets)
+#tw.df2 = twListToDF(tweets2)
+#tw.df3 = twListToDF(tweets3)
+#tw.df4 = twListToDF(tweets4)
+#tw.df5 = twListToDF(tweets5)
+#tw.df6 = twListToDF(tweets6)
+#tw.df7 = twListToDF(tweets7)
+#tw.df8 = twListToDF(tweets8)
+
+#tw.df = rbind(tw.df, tw.df2, tw.df3, tw.df4, tw.df5, tw.df6, tw.df7, tw.df8)
+
+#save(tw.df, file = 'tw_df.Rda')
+
+#load tweets data frame
+load('tw_df.Rda')
+
+#remove retweets
+tw.df <- tw.df %>% filter(isRetweet == FALSE)
+
+#convert time zone from UTC to EST
+tw.df$created = format(tw.df$created, tz = "America/New_York")
+
+tw.df = tbl_df(tw.df) %>% select(text, created) %>% 
+    mutate(date  = substr(created, 1,10),
+           hour = hour(created))
+
+tw.df$date = as.Date(tw.df$date, format = "%Y-%m-%d")
+
+names(tw.df)
+dim(tw.df)
+
+#############################
+#############################
+#### SENTIMENT ANALYSIS #####
+#############################
+#############################
+#good illustration for sentiment analysis (basic) can be found below:
+#code has been replicated to use a much simpler syntax, using dplyr
+#https://github.com/jeffreybreen/twitter-sentiment-analysis-tutorial-201107/blob/master/R/2_run.R
+
+
+# add a few twitter and industry favorites
+pos.words = fread('positive-words.txt', header = FALSE)
+setnames(pos.words, 1, 'word')
+
+neg.words = fread('negative-words.txt', header = FALSE)
+setnames(neg.words, 1, 'word')
+
+pos.words = c(pos.words$word, 'lowpriced')
+neg.words = c(neg.words$word, 'wtf')
+
+
+#remove words with '@' symbol
+RemoveAtPeople <- function(tweet) {
+    gsub("@\\w+", "", tweet)
+}
+
+#remove URLs
+removeURL <- function(x) gsub("http[[:alnum:][:punct:]]*", "", x)
+
+
+#for Macs, ensure the encoding works
+convert_type <- function(x) iconv(x, to='UTF-8-MAC', sub='byte')
+
+sentiment.df = tw.df %>% mutate(sentence = gsub('[[:punct:]]', '', text)) %>% 
+    mutate(sentence = convert_type(sentence)) %>%
+    mutate(sentence = RemoveAtPeople(sentence)) %>%
+    mutate(sentence = removeURL(sentence)) %>%
+    mutate(sentence = gsub('[[:cntrl:]]', '', sentence)) %>%
+    mutate(sentence = gsub('\\d+', '', sentence)) %>% 
+    mutate(sentence = tolower(sentence)) %>% rowwise() %>%
+    mutate(score =  sum(!is.na(match(unlist(str_split(sentence, '\\s+')), pos.words))) -
+               sum(!is.na(match(unlist(str_split(sentence, '\\s+')), neg.words)))) %>%
+    select(text, date, hour, created, score)
+
+
+sentiment.df$created <- as.POSIXct(strptime(sentiment.df$created, "%Y-%m-%d %H"))
+    
+#########################################
+#### Hourly avg. sentiment scores vs.####
+#### Hourly stock prices ################
+#########################################
+
+#Import hourly stock prices that was previously obtained through Python (easier
+#parsing than R) Python function is found in 'Intraday_Stock_Prices.py'
+
+stockprice = fread("Amazon_stock_price.csv")
+
+stockprice <- tbl_df(stockprice) %>% select(ts, c) 
+setnames(stockprice, c('ts', 'c'),c('date_time', 'stock_price'))
+
+stockprice <- stockprice %>% mutate(date  = substr(date_time, 1,10),
+                                    hour  = substr(date_time, 12,13))
+
+stockprice$date = as.Date(stockprice$date, format = "%Y-%m-%d")
+stockprice$hour = as.integer(stockprice$hour)
+
+stockprice$date_time <- as.POSIXct(strptime(stockprice$date_time, "%Y-%m-%d %H"))
+
+sentiment_summary = sentiment.df %>% group_by(created) %>% 
+    summarise(sentiment_score_avg = mean(score))
+
+lower <- with(sentiment_summary,as.POSIXct(strftime(min(created),"%Y-%m-%d")))
+upper <- with(sentiment_summary,as.POSIXct(strftime(as.Date(max(created))+1,"%Y-%m-%d"))-1)
+limits = c(lower,upper)
+
+sentiment_graph = ggplot(sentiment_summary, aes(created, sentiment_score_avg)) + geom_line() +
+  scale_x_datetime(labels = date_format("%m-%d"),
+                   breaks = date_breaks("1 day"),
+                   limits = limits) + theme_economist() + 
+    labs(title = "Avg. Sentiment Score for Amazon by Date and Time", x="Date and time",
+         y="Sentiment Score") + 
+    theme(axis.text = element_text(size = 14), axis.title = element_text(size = 14), 
+          plot.title = element_text(size = 18))
+
+
+stock_graph = ggplot(filter(stockprice, date > '2015-07-15' & date < '2015-07-24'), aes(date_time, stock_price)) + geom_line() +
+   scale_x_datetime(labels = date_format("%m-%d"),
+                   breaks = date_breaks("1 day"),
+                   limits = limits)  + theme_economist_white() + 
+    labs(title = "Amazon Hourly Stock Price", x="Date and time",
+         y="Closing Price") + 
+    theme(axis.text = element_text(size = 14), axis.title = element_text(size = 14), 
+          plot.title = element_text(size = 18))
+
+```
+
+
+
+
+Any relationship? 
+========================================================
+```{r "E6a", echo=FALSE}
+grid.arrange(sentiment_graph, stock_graph, nrow=2)   
+
+```
+
+
+
+
+Distribution of daily sentiment scores 
+========================================================
+type:prompt
+```{r "E6b", echo=FALSE}
+##################################################
+#### Daily Sentiment Polarity Index  #############
+##################################################
+
+
+#Visualize distribution of sentiment scores for each day:
+sent_hist <- ggplot(sentiment.df, aes(x=score)) +
+    geom_histogram(binwidth=.5, colour="black", fill="lightblue") +
+    geom_vline(aes(xintercept=mean(score, na.rm=T)),   # Ignore NA values for mean
+               color="red", linetype="dashed", size=1) + theme_economist_white() +
+                guides(fill=FALSE) + 
+        labs(title = "Distribution of daily sentiment scores", x="sentiment score", y="No. of comments")
+
+sent_hist + facet_wrap(~date) +
+    theme(legend.text = element_text(size = 12), plot.title = element_text(size = 22),
+          axis.text.x = element_text(size = 14),
+          axis.text.y = element_text(size = 18),
+          axis.title = element_text(size = 20),
+          strip.text = element_text(size= 18, face = 'bold'))
+```
+
+Sentiment polarity index vs. scores 
+========================================================
+```{r "E6c", echo=FALSE}
+
+#let's exclude the neutral sentiment scores and create a sentiment orientation
+sentiment_polar <- sentiment.df %>% select(date, score) %>% 
+        mutate(direction = ifelse(score > 0, 'positive',
+                ifelse(score < 0, 'negative','neutral'))) %>% 
+                filter(direction != 'neutral') %>% 
+  group_by(date) %>% summarise(
+  polarity_index = round((sum(direction == 'positive')-sum(direction=='negative'))/n() *100,0))
+
+avg_sentiment_day <- sentiment.df %>% group_by(date) %>%
+                    summarise(avg_sentiment_score = mean(score, na.rm = TRUE))
+
+sentiment_polar <- merge(sentiment_polar, avg_sentiment_day, by = 'date')
+
+#let's graph polarity index and avg_sentiment score
+avg_score_graph = ggplot(data=sentiment_polar, aes(x=date, y=avg_sentiment_score, fill=avg_sentiment_score)) +
+    geom_bar(stat="identity", position=position_dodge(), colour="black") + 
+    theme_economist_white() + guides(fill=FALSE) + 
+    geom_text(aes(x = date, y = avg_sentiment_score, 
+                  label = round(avg_sentiment_score,2)),
+              hjust=0.5,vjust=-0.4, size = 6) + 
+    labs(title = "Average sentiment score", x="date", y="avg. sentiment score") + 
+    theme(legend.text = element_text(size = 12), plot.title = element_text(size = 22),
+          axis.text.x = element_text(size = 16),
+          axis.text.y = element_text(size = 18),
+          axis.title = element_text(size = 20),
+          strip.text = element_text(size= 18, face = 'bold'))
+
+polarity_graph = ggplot(data=sentiment_polar, aes(x=date, y=polarity_index, fill=polarity_index)) +
+    geom_bar(stat="identity", position=position_dodge(), colour="black") + 
+    theme_economist() + guides(fill=FALSE) + 
+    geom_text(aes(x = date, y = polarity_index, 
+                  label = polarity_index),
+              hjust=0.5,vjust=-0.4, size = 6) + 
+    labs(title = "Sentiment polarity index", x="date", y="polarity index") + 
+    theme(legend.text = element_text(size = 12), plot.title = element_text(size = 22),
+          axis.text.x = element_text(size = 16),
+          axis.text.y = element_text(size = 18),
+          axis.title = element_text(size = 20),
+          strip.text = element_text(size= 18, face = 'bold'))
+
+
+grid.arrange(polarity_graph, avg_score_graph, nrow=1)
+
+```
+
+
+```{r "E6d", echo=FALSE}
+#####################################################################
+#####################################################################
+######################## TEXT MINING ################################
+#####################################################################
+#####################################################################
+
+############
+
+tw.df.pre <- tw.df %>% filter(date == '2015-07-16') 
+#this is one day after Amazon Prime Day
+
+tw.df.post <- tw.df %>% filter(date == '2015-07-23')
+#this is the day quarterly results came out
+
+
+tweets_text_pre <- as.character(tw.df.pre$text)
+
+tweets_text_pre <- as.vector(sapply(tweets_text_pre, RemoveAtPeople))
+
+tweets_text_pre <- as.vector(sapply(tweets_text_pre, removeURL))
+
+
+tweets_text_post <- as.character(tw.df.post$text)
+
+tweets_text_post <- as.vector(sapply(tweets_text_post, RemoveAtPeople))
+
+tweets_text_post <- as.vector(sapply(tweets_text_post, removeURL))
+
+#create corpus
+r_stats_text_corpus <- Corpus(VectorSource(tweets_text_pre))
+
+r_stats_text_corpus_post <- Corpus(VectorSource(tweets_text_post))
+
+#if you get the below error
+#In mclapply(content(x), FUN, ...) :
+#  all scheduled cores encountered errors in user code
+#add mc.cores=1 into each function
+
+#run this step if you get the error:
+#(please break it!)' in 'utf8towcs'
+
+r_stats_text_corpus <- tm_map(r_stats_text_corpus, 
+                              content_transformer(function(x) iconv(x, to='UTF-8-MAC', sub='byte')), 
+                              mc.cores=1)
+
+r_stats_text_corpus_post <- tm_map(r_stats_text_corpus_post, 
+                              content_transformer(function(x) iconv(x, to='UTF-8-MAC', sub='byte')), 
+                              mc.cores=1)
+
+#remove certain symbols, stop words, etc. from our tweets text
+toSpace <- content_transformer(function(x, pattern) gsub(pattern, " ", x))
+r_stats_text_corpus <- tm_map(r_stats_text_corpus, toSpace, "/|@|\\|")
+r_stats_text_corpus_post <- tm_map(r_stats_text_corpus_post, toSpace, "/|@|\\|")
+
+#convert all words to lowercase...use "mc.cores" argument for macs only
+r_stats_text_corpus <- tm_map(r_stats_text_corpus, content_transformer(tolower), mc.cores=1)
+r_stats_text_corpus_post <- tm_map(r_stats_text_corpus_post, content_transformer(tolower), mc.cores=1)
+
+#remove numbers
+r_stats_text_corpus <- tm_map(r_stats_text_corpus, removeNumbers, mc.cores=1)
+r_stats_text_corpus_post <- tm_map(r_stats_text_corpus_post, removeNumbers, mc.cores=1)
+
+#remove punctuations
+r_stats_text_corpus <- tm_map(r_stats_text_corpus, removePunctuation, mc.cores=1)
+r_stats_text_corpus_post <- tm_map(r_stats_text_corpus_post, removePunctuation, mc.cores=1)
+
+#remove english stopwords ("useless" and commong words like 'for', 'are', etc.)
+r_stats_text_corpus <- tm_map(r_stats_text_corpus, removeWords, stopwords("english"), mc.cores=1)
+r_stats_text_corpus_post <- tm_map(r_stats_text_corpus_post, removeWords, stopwords("english"), mc.cores=1)
+
+#remove tailored words we specify
+r_stats_text_corpus <- tm_map(r_stats_text_corpus, removeWords, c("amazon", "prime", "day", "amazons"), mc.cores=1)
+r_stats_text_corpus_post <- tm_map(r_stats_text_corpus_post, removeWords, c("amazon", "prime", "day", "amazons"), mc.cores=1)
+
+#let's get rid of whitespace
+r_stats_text_corpus <- tm_map(r_stats_text_corpus, stripWhitespace, mc.cores=1)
+r_stats_text_corpus_post <- tm_map(r_stats_text_corpus_post, stripWhitespace, mc.cores=1)
+
+#creating a term document matrix...this has words as rows and documents (tweets as columns)
+
+corpus <- Corpus(VectorSource(r_stats_text_corpus))
+corpus_post <- Corpus(VectorSource(r_stats_text_corpus_post))
+
+ap.tdm <- TermDocumentMatrix(corpus)
+ap.tdm.post <- TermDocumentMatrix(corpus_post)
+
+#removing sparse terms
+ap.tdm <- removeSparseTerms(ap.tdm, 0.999)
+ap.tdm.post <- removeSparseTerms(ap.tdm.post, 0.999)
+
+#####################################################################
+#####################################################################
+################### CREATING TRIGRAMS ###############################
+#####################################################################
+#####################################################################
+
+require(RWeka)
+options(mc.cores=1)
+ngramTokenizer <- function(x) NGramTokenizer(x, Weka_control(min = 4, max = 6))
+
+
+ngram.dm <- TermDocumentMatrix(corpus, control = list(tokenize = ngramTokenizer))
+ngram.dm <- removeSparseTerms(ngram.dm, 0.999)
+
+ngram.dm.post <- TermDocumentMatrix(corpus_post, control = list(tokenize = ngramTokenizer))
+ngram.dm.post <- removeSparseTerms(ngram.dm.post, 0.999)
+
+#####################################################################
+#####################################################################
+################### TOP WORDS / NGRAMS ##############################
+#####################################################################
+#####################################################################
+
+ap.m <- as.matrix(ap.tdm)
+ap.m.post <- as.matrix(ap.tdm.post)
+
+ap.v <- sort(rowSums(ap.m),decreasing=TRUE)
+ap.v.post <- sort(rowSums(ap.m.post),decreasing=TRUE)
+
+top_words <- data.frame(word = names(ap.v),freq=ap.v)
+top_words.post <- data.frame(word = names(ap.v.post),freq=ap.v.post)
+
+top_words <- tbl_df(top_words) %>% arrange(desc(freq))
+top_words.post <- tbl_df(top_words.post) %>% arrange(desc(freq))
+
+
+ngram.m <- as.matrix(ngram.dm)
+ngram.m.post <- as.matrix(ngram.dm.post)
+
+ngram.v <- sort(rowSums(ngram.m),decreasing=TRUE)
+ngram.v.post <- sort(rowSums(ngram.m.post),decreasing=TRUE)
+
+top_ngrams <- data.frame(word = names(ngram.v),freq=ngram.v)
+top_ngrams.post <- data.frame(word = names(ngram.v.post),freq=ngram.v.post)
+
+top_ngrams <- tbl_df(top_ngrams) %>% arrange(desc(freq))
+top_ngrams.post <- tbl_df(top_ngrams.post) %>% arrange(desc(freq))
+
+```
+
+
+
+One day after Amazon Prime Day (July 15)   
+========================================================
+type:alert
+```{r "E7", echo=FALSE}
+#####################################################################
+#####################################################################
+############## VISUALIZING WORDS AND NGRAMS / TAGS ##################
+#####################################################################
+#####################################################################
+library('wordcloud')
+#visualizing words  1 day after Amazon Prime Day (July 16)
+pal2 <- brewer.pal(8,"Dark2")
+wordcloud(top_words$word,top_words$freq,min.freq=2,
+          max.words=100, random.order=FALSE, rot.per=.15, colors=pal2)
+
+```
+
+
+
+Top taglines (4-6 ngrams) on July 16   
+========================================================
+type:alert
+```{r "E7-3", echo=FALSE}
+
+library('tagcloud')
+
+#visualizing ngrams 1 day after Amazon Prime Day (July 16)
+colors  <- smoothPalette(top_ngrams$freq,  brewer.pal(8, 'Dark2'))
+tagcloud(top_ngrams$word, top_ngrams$freq, sel= 1:25,col= colors, algorithm= "oval", scale.multiplier = 0.75)
+
+```
+
+
+Day of earnings results (July 23)     
+========================================================
+type:prompt
+```{r "E7-2", echo=FALSE}
+
+#visualizing words on July 23rd - the day Amazon quarterly results came out
+wordcloud(top_words.post$word,top_words.post$freq,min.freq=2,
+          max.words=100, random.order=FALSE, rot.per=.15, colors=pal2)
+
+```
+
+
+
+July 23 a stark contrast to July 16   
+========================================================
+type:prompt
+```{r "E7-4", echo=FALSE}
+
+#visualizing ngrams on July 23rd - the day Amazon quarterly results came out
+colors  <- smoothPalette(top_ngrams.post$freq,  brewer.pal(8, 'Dark2'))
+tagcloud(top_ngrams.post$word, top_ngrams.post$freq, sel= 1:25,col= colors, algorithm= "oval", scale.multiplier = 0.75)
+```
+
+
+
+Summary
+========================================================
+type: prompt
+- Pricing is the most powerful business lever (and it can be fun!)   
+- Be price competitive **where you need to be**  
+    + Don't give up **$$$** unnecessarily     
+- Simple things will make a big difference in business results     
+- Develop your **price analytics core** first     
+    + *Near* real-time, descriptive and exploratory analysis      
+- Listen to what your customers are saying (commenting, tweeting, blogging)  
+    + Analyze them and adjust strategies accordingly    
+
+
+Questions?
+========================================================
+type: section
